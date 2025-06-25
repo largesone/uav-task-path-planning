@@ -1,0 +1,4 @@
+运行“main_t_p.py”是基于改进遗传算法的优化方法，复现“Cooperative task allocation with simultaneous arrival and resource constraint for multi-UAV using a genetic algorithm”
+
+
+“uav_task_allocation_gnn”强化学习算法还在调试中。。。。
