@@ -14,11 +14,12 @@ import pickle
 from concurrent.futures import ThreadPoolExecutor
 import matplotlib
 import matplotlib.font_manager as fm
+from tqdm import tqdm
 
+
+#  该算法用于计算单无人机资源量大，可支持完成多项任务情况,一个目标只能分配给一个无人机，目标分配过就不再分配
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'  # 允许重复加载OpenMP库
-# 图计算优化：  22:42
-
 
 # 设置中文字体，增强错误处理
 def set_chinese_font(preferred_fonts=None):
@@ -46,8 +47,6 @@ def set_chinese_font(preferred_fonts=None):
     except Exception:
         print("错误: 字体设置失败，中文可能无法正常显示")
         return False
-
-
 def visualize_task_assignments(task_assignments, uavs, targets, show=True):
     """可视化多无人机任务分配结果"""
     font_set = set_chinese_font()
@@ -181,6 +180,7 @@ class DirectedGraph:
         self.n_phi = n_phi  # 航向角离散化数量
         self.phi_set = [2 * np.pi * i / n_phi for i in range(n_phi)]  # 离散化航向角集合
         self.cache_path = cache_path
+        self.uav_ids = {uav.id for uav in uavs}
 
         # 尝试从缓存加载
         if cache_path and os.path.exists(cache_path):
@@ -199,11 +199,11 @@ class DirectedGraph:
     def _create_vertices(self) -> Dict:
         """创建图的顶点"""
         vertices = {'UAVs': {}, 'Targets': {}}
-        # 创建无人机顶点
+        # 【修改】创建无人机顶点时，使用其ID的负数来确保唯一性
         for uav in self.uavs:
-            vertices['UAVs'][uav.id] = [(uav.id, phi) for phi in [uav.heading]]  # 初始航向角
+            vertices['UAVs'][uav.id] = [(-uav.id, phi) for phi in [uav.heading]]
 
-        # 创建目标顶点
+        # 创建目标顶点 (这部分不变)
         for target in self.targets:
             vertices['Targets'][target.id] = [(target.id, phi) for phi in self.phi_set]
 
@@ -244,31 +244,31 @@ class DirectedGraph:
         return edges
 
     def _create_adjacency_matrix(self) -> np.ndarray:
-        """创建邻接矩阵，存储边的权重（路径长度）"""
-        n_vertices = self._count_vertices()
-        adj_matrix = np.inf * np.ones((n_vertices, n_vertices))
-        # 确保对角线元素为0（自身到自身的距离）
+        """
+        创建邻接矩阵（优化版：无多线程，只计算有效边）
+        """
+        n_vertices = len(self.vertex_to_idx)
+        # 初始化一个充满无限大值的矩阵
+        adj_matrix = np.full((n_vertices, n_vertices), np.inf)
+
+        # 将对角线（自身到自身）的距离设置为0
         np.fill_diagonal(adj_matrix, 0)
 
-        # 使用多线程并行计算路径长度
-        def compute_edge_weight(i, j, edge_i, edge_j):
-            # 跳过对角线元素，已在上面设置为0
-            if i == j:
-                return
-            if (edge_i, edge_j) in self.edges:
-                adj_matrix[i, j] = self._calculate_path_length(edge_i, edge_j)
+        print("开始计算邻接矩阵（这在首次运行时可能需要一些时间）...")
+        # 只遍历实际存在的边，而不是所有顶点对
+        for start_vertex, end_vertex in self.edges:
+            try:
+                start_idx = self.vertex_to_idx[start_vertex]
+                end_idx = self.vertex_to_idx[end_vertex]
 
-        vertices = self._flatten_vertices()
-        with ThreadPoolExecutor() as executor:
-            futures = []
-            for i, edge_i in enumerate(vertices):
-                for j, edge_j in enumerate(vertices):
-                    futures.append(executor.submit(compute_edge_weight, i, j, edge_i, edge_j))
+                # 计算并赋值边的权重（路径长度）
+                adj_matrix[start_idx, end_idx] = self._calculate_path_length(start_vertex, end_vertex)
+            except KeyError as e:
+                # 这个错误理论上不应发生，但作为安全措施保留
+                print(f"警告: 在计算邻接矩阵时，顶点 {e} 未在索引中找到。")
+                continue
 
-            # 等待所有任务完成
-            for future in futures:
-                future.result()
-
+        print("邻接矩阵计算完成。")
         return adj_matrix
 
     def _flatten_vertices(self) -> List[Tuple]:
@@ -294,14 +294,19 @@ class DirectedGraph:
         if vertex in self.position_cache:
             return self.position_cache[vertex]
 
-        if vertex[0] < 0:  # 无人机顶点
-            uav_id = -vertex[0]
+        vertex_id = vertex[0]
+
+        # 【修复】使用 self.uav_ids 集合来正确判断顶点类型
+        # 这个 < 0 的判断现在是正确且必要的
+        if vertex_id < 0:
+            # 这是一个无人机顶点，ID是负数
+            uav_id = -vertex_id
             uav = next(uav for uav in self.uavs if uav.id == uav_id)
-            pos = uav.current_position
+            # 图构建时，使用无人机的初始位置
+            pos = uav.position
         else:
-            # 目标顶点，获取目标位置
-            target_id = vertex[0]
-            target = next(target for target in self.targets if target.id == target_id)
+            # 这是一个目标顶点
+            target = next(target for target in self.targets if target.id == vertex_id)
             pos = target.position
 
         self.position_cache[vertex] = pos
@@ -452,8 +457,9 @@ class UAVTaskEnv:
         target = next(t for t in self.targets if t.id == target_id)
         uav = next(u for u in self.uavs if u.id == uav_id)
 
-        # 计算资源成本
+        # 1. 统计当前目标已分配的无人机数量
         assigned_count = sum(1 for a in target.allocated_uavs if a[0] == uav_id)
+        # 成本 = 总需求 / (已分配数量 + 当前这1架)
         resource_cost = target.resources / (assigned_count + 1)
 
         # 检查资源约束
@@ -461,12 +467,12 @@ class UAVTaskEnv:
             print(f"资源不足: UAV{uav_id}无法分配到目标{target_id}, 剩余资源: {uav.resources}, 需要: {resource_cost}")
             return self.state, -10, False, {}
 
-        # 更新无人机和目标状态
-        uav.resources -= np.array(resource_cost, dtype=np.int32)
-
+        # 更新无人机和目标状态,向上取整，确保消耗的资源总是足够的
+        uav.resources -= np.ceil(resource_cost).astype(np.int32)
         # 计算路径长度
         if not uav.task_sequence:
-            start_vertex = (uav.id, uav.heading)
+            # 【修改】无人机的初始顶点ID应为负数
+            start_vertex = (-uav.id, uav.heading)
         else:
             last_target_id, last_phi_idx = uav.task_sequence[-1]
             start_vertex = (last_target_id, self.graph.phi_set[last_phi_idx])
@@ -540,28 +546,43 @@ class UAVTaskEnv:
 
     # 定义基于图强化学习的求解算法 - 优化版本
 class GraphRLSolver:
+    # 在 class GraphRLSolver 中
+
     def __init__(self, uavs, targets, graph, input_dim, hidden_dim, output_dim,
-                 learning_rate=0.001, gamma=0.99, epsilon=1.0, batch_size=64, memory_size=10000):
+                 learning_rate=0.001,
+                 gamma=0.99,
+                 epsilon=1.0,
+                 epsilon_decay=0.999,
+                 epsilon_min=0.05,
+                 batch_size=64,
+                 memory_size=10000,
+                 load_balance_penalty=0.1):
+
         self.graph = graph
-        self.env = UAVTaskEnv(uavs, targets, graph)
+        self.env = UAVTaskEnv(uavs, targets, graph, load_balance_penalty)
+
         self.model = GNN(input_dim, hidden_dim, output_dim)
+
+        # --- 新增代码：初始化目标网络 (Target Network) ---
         self.target_model = GNN(input_dim, hidden_dim, output_dim)
         self.target_model.load_state_dict(self.model.state_dict())
-        self.target_model.eval()
+        self.target_model.eval()  # 将目标网络设置为评估模式，它不直接参与训练
+        # --- 新增代码结束 ---
+
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.gamma = gamma
         self.epsilon = epsilon
         self.batch_size = batch_size
         self.memory = deque(maxlen=memory_size)
-        self.epsilon_decay = 0.999  # <--- 修改2：减慢探索率的衰减速度 (从 0.995 到 0.999)
-        self.epsilon_min = 0.05  # <--- 修改3：提高最低探索率 (从 0.01 到 0.05)
-        self.target_update_freq = 10
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+        self.target_update_freq = 10  # 每10步更新一次目标网络
         self.step_count = 0
 
         # 检查是否有GPU可用
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-        self.target_model.to(self.device)
+        self.target_model.to(self.device)  # <-- 现在这行代码可以正常工作了
 
         # 初始化用于记录训练历史的字典
         self.train_history = {
@@ -720,7 +741,7 @@ class GraphRLSolver:
             return False
 
     def train(self, episodes, use_cache=True, cache_path='./saved_model.pth',
-              early_stopping_patience=10, save_best_only=True, log_interval=10):
+              early_stopping_patience=10, save_best_only=True, log_interval=10,enable_plotting=True):
 
         start_time = time.time()
 
@@ -734,7 +755,7 @@ class GraphRLSolver:
         if use_cache and self.load_model(cache_path):
             print("继续之前的训练...")
 
-        for episode in range(episodes):
+        for episode in tqdm(range(episodes), desc=f"Training ({episodes} episodes)"):
             episode_start_time = time.time()
             state = self.env.reset()
             done = False
@@ -811,7 +832,6 @@ class GraphRLSolver:
                 next_state, reward, done, _ = self.env.step(action)
                 print(f"Episode {episode + 1}, Step {steps + 1}: Action={action}, Reward={reward:.2f}, Done={done}")
 
-
                 self.remember(state, action, reward, next_state, done)
                 state = next_state
                 total_reward += reward
@@ -822,22 +842,23 @@ class GraphRLSolver:
                     if loss is not None:
                         episode_losses.append(loss)
 
+
             # 记录本轮训练数据
             self.train_history['episode_rewards'].append(total_reward)
             self.train_history['episode_steps'].append(steps)
             self.train_history['mean_q_values'].append(np.mean(q_values) if q_values else 0)
             self.train_history['losses'].append(np.mean(episode_losses) if episode_losses else 0)
 
-            # 打印训练进度
+            # 打印训练进度 (这个可以保留，它会和进度条和谐共存)
             if (episode + 1) % log_interval == 0:
-                elapsed = time.time() - episode_start_time
-                print(f"Episode {episode + 1}/{episodes} | "
-                      f"Reward: {total_reward:.2f} | "
-                      f"Steps: {steps} | "
-                      f"Epsilon: {self.epsilon:.3f} | "
-                      f"LR: {self.optimizer.param_groups[0]['lr']:.6f} | "
-                      f"Loss: {self.train_history['losses'][-1]:.4f} | "
-                      f"Time: {elapsed:.2f}s")
+                # tqdm.write 可以确保打印信息时不会弄乱进度条
+                tqdm.write(f"Episode {episode + 1}/{episodes} | "
+                           f"Reward: {total_reward:.2f} | "
+                           f"Steps: {steps} | "
+                           f"Epsilon: {self.epsilon:.3f} | "
+                           f"LR: {self.optimizer.param_groups[0]['lr']:.6f} | "
+                           f"Loss: {np.mean(episode_losses) if episode_losses else 0:.4f} | "
+                           f"Time: {time.time() - episode_start_time:.2f}s")
 
             # 更新学习率
             scheduler.step(total_reward)
@@ -867,9 +888,10 @@ class GraphRLSolver:
 
         total_time = time.time() - start_time
         print(f"训练完成，总耗时: {total_time:.2f}s")
-
-        # 绘制训练曲线
-        self._plot_training_history()
+        # 【修改】只有在允许的情况下才绘制训练曲线
+        if enable_plotting:
+            print("正在生成训练历史图...")
+            self._plot_training_history()
 
         return self.train_history
 
@@ -935,20 +957,42 @@ def main():
         Target(id=5, position=[7, 12], resources=[22], value=11)
     ]
 
-    # load_balance_penalty值越大，模型就越倾向于牺牲总路径长度来换取任务的均衡分配
-    load_balance_penalty = 0.5
     # 创建图并使用缓存
     graph = DirectedGraph(uavs, targets, cache_path='./graph_cache.pkl')
 
-    temp_env = UAVTaskEnv(uavs, targets, graph, load_balance_penalty) # 可调整此值
-    input_dim = len(temp_env.reset())  # 从环境获取正确的状态维度
+    # 【修改】与调优脚本保持一致的初始化方式
+    # 定义超参数
+    params = {
+        'learning_rate': 0.0005,
+        'load_balance_penalty': 0.5,
+        'epsilon_decay': 0.999,
+        'epsilon_min': 0.05
+    }
+    best_params = {
+        'learning_rate': 0.0005,
+        'load_balance_penalty': 1.0,
+        'epsilon_decay': 0.999,
+        'epsilon_min': 0.05  # epsilon_min 不在调优范围内，保持一个较好的默认值
+    }
+
+    # 动态计算维度
+    temp_env = UAVTaskEnv(uavs, targets, graph, load_balance_penalty=best_params['load_balance_penalty'])
+    input_dim = len(temp_env.reset())
     output_dim = len(targets) * len(uavs) * graph.n_phi
 
-    # 创建求解器并训练
-    solver = GraphRLSolver(uavs, targets, graph, input_dim, 128, output_dim)
+    # 创建求解器并传入最优参数
+    solver = GraphRLSolver(
+        uavs=uavs,
+        targets=targets,
+        graph=graph,
+        input_dim=input_dim,
+        hidden_dim=128,
+        output_dim=output_dim,
+        **best_params
+    )
 
-    # 修改1：增加总轮数, 修改2：增加早停的耐心
-    solver.train(episodes=500, use_cache=False, early_stopping_patience=30)
+    # 训练模型 (这里 enable_plotting=True，因为是单次运行)
+    solver.train(episodes=500, use_cache=False, early_stopping_patience=30, enable_plotting=True)
 
     # 获取任务分配结果
     task_assignments = solver.get_task_assignments()

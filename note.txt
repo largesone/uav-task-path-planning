@@ -1,4 +1,9 @@
 运行“main_t_p.py”是基于改进遗传算法的优化方法，复现“Cooperative task allocation with simultaneous arrival and resource constraint for multi-UAV using a genetic algorithm”
 
+uav-task-ga  ：#  该算法用于计算单无人机资源量大，可支持完成多项任务情况,算法为GA改进算法
 
-“uav_task_allocation_gnn”强化学习算法还在调试中。。。。
+uav_task_allocation_gcn_dl：#  该算法用于计算单无人机资源量大，可支持完成多项任务情况,一个目标只能分配给一个无人机，目标分配过就不再分配，算法为图强化学习
+
+uav_task_allocation_gcn_dl-resVector-ok：# 多无人机协同完成多目标打击任务，适应每个无人机资源小于目标资源需求的情况，算法为图强化学习，考虑了资源约束
+
+uav_task_allocation_gcn_dl-syn-ok  # 多无人机协同完成多目标打击任务，适应每个无人机资源小于目标资源需求的情况，算法为图强化学习，考虑了资源约束+到达目标时间同步约束，无人机增加了速度信息
