@@ -1,0 +1,3 @@
+Testing MCP filesystem tools - updated content
+Line 2
+Line 3Appended line

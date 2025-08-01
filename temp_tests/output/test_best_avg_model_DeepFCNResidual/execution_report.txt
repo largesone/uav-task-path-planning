@@ -1,0 +1,53 @@
+场景执行报告
+=============
+
+场景名称: test_best_avg_model
+网络类型: DeepFCNResidual
+训练时间: 6.32秒
+任务分配数量: 4
+
+评估指标:
+  completion_rate: 0.6667
+  satisfied_targets_rate: 1.0000
+  target_satisfaction_rate: 0.5000
+  resource_satisfaction_rate: 0.8333
+  resource_utilization_rate: 0.8333
+  total_reward_score: 2900.0000
+  marginal_utility_score: 66.6667
+  resource_efficiency_score: 2500.0000
+  distance_cost_score: -0.0000
+  target_completion_score: 333.3333
+  completion_bonus: 0
+  completed_targets_count: 1
+  total_targets_count: 2
+  total_contribution: 10.0000
+  total_demand: 12
+  total_initial_supply: 12
+
+训练统计:
+  reward_mean: -254.8315
+  reward_std: 392.8780
+  reward_max: 412.7306
+  reward_min: -785.8395
+  reward_final: -785.8395
+  reward_improvement: -738.8632
+  loss_mean: 2485.8505
+  loss_std: 1682.0881
+  loss_final: 3969.2459
+  loss_min: 0.0000
+
+训练历史摘要:
+  总回合数: 13
+  最终奖励: -785.84
+  最终损失: 3969.2459
+  最终探索率: 0.8432
+  最终完成率: 0.5000
+
+配置参数:
+  episodes: 30
+  learning_rate: 0.0001
+  batch_size: 64
+  gamma: 0.99
+  epsilon_start: 0.9
+  epsilon_end: 0.1
+  epsilon_decay: 0.9995

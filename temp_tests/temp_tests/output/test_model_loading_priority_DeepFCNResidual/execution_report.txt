@@ -1,0 +1,53 @@
+场景执行报告
+=============
+
+场景名称: test_model_loading_priority
+网络类型: DeepFCNResidual
+训练时间: 2.66秒
+任务分配数量: 4
+
+评估指标:
+  completion_rate: 0.5000
+  satisfied_targets_rate: 0.5000
+  target_satisfaction_rate: 0.5000
+  resource_satisfaction_rate: 0.5000
+  resource_utilization_rate: 0.5000
+  total_reward_score: 750.0000
+  marginal_utility_score: 0.0000
+  resource_efficiency_score: 500.0000
+  distance_cost_score: -0.0000
+  target_completion_score: 250.0000
+  completion_bonus: 0
+  completed_targets_count: 1
+  total_targets_count: 2
+  total_contribution: 6.0000
+  total_demand: 12
+  total_initial_supply: 12
+
+训练统计:
+  reward_mean: -221.5033
+  reward_std: 444.0046
+  reward_max: 441.8399
+  reward_min: -852.1311
+  reward_final: -650.5707
+  reward_improvement: 7.6942
+  loss_mean: 1569.3290
+  loss_std: 1579.6512
+  loss_final: 3357.4556
+  loss_min: 0.0000
+
+训练历史摘要:
+  总回合数: 10
+  最终奖励: -650.57
+  最终损失: 3357.4556
+  最终探索率: 0.8560
+  最终完成率: 0.7083
+
+配置参数:
+  episodes: 20
+  learning_rate: 0.0001
+  batch_size: 64
+  gamma: 0.99
+  epsilon_start: 0.9
+  epsilon_end: 0.1
+  epsilon_decay: 0.9995

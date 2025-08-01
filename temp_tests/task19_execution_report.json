@@ -1,0 +1,34 @@
+{
+  "task_id": 19,
+  "task_name": "端到端系统集成测试",
+  "execution_time": "2025-07-31 20:13:53",
+  "total_duration": 20.865761518478394,
+  "summary": {
+    "total_tests": 2,
+    "passed_tests": 1,
+    "failed_tests": 1,
+    "timeout_tests": 0,
+    "error_tests": 0,
+    "success_rate": 0.5
+  },
+  "test_results": [
+    {
+      "test_name": "端到端集成测试",
+      "script_path": "F:\\Work\\Code\\uavs_plan_v0.3\\temp_tests\\test_end_to_end_integration.py",
+      "duration": 0.3215055465698242,
+      "return_code": 0,
+      "status": "PASSED",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "test_name": "分布式训练稳定性测试",
+      "script_path": "F:\\Work\\Code\\uavs_plan_v0.3\\temp_tests\\test_distributed_training_stability.py",
+      "duration": 20.523229837417603,
+      "return_code": 2,
+      "status": "FAILED",
+      "stdout": "[LocalAttention] xformers不可用，使用标准注意力实现\n分布式训练测试初始化完成，输出目录: C:\\Users\\xianq\\AppData\\Local\\Temp\\dist_test_kxy1jb5h\n============================================================\n开始分布式训练稳定性测试\n============================================================\n\n=== 测试Ray集群初始化 ===\n分布式测试执行失败: 'gbk' codec can't encode character '\\u2717' in position 0: illegal multibyte sequence\n",
+      "stderr": "2025-07-31 20:13:50,584\tINFO worker.py:1927 -- Started a local Ray instance.\n"
+    }
+  ]
+}

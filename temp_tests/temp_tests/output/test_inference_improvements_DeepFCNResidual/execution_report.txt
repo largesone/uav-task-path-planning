@@ -1,0 +1,53 @@
+场景执行报告
+=============
+
+场景名称: test_inference_improvements
+网络类型: DeepFCNResidual
+训练时间: 5.73秒
+任务分配数量: 4
+
+评估指标:
+  completion_rate: 0.5417
+  satisfied_targets_rate: 1.0000
+  target_satisfaction_rate: 0.5000
+  resource_satisfaction_rate: 0.5833
+  resource_utilization_rate: 0.5833
+  total_reward_score: 1408.4560
+  marginal_utility_score: 41.6667
+  resource_efficiency_score: 1166.6667
+  distance_cost_score: -70.7107
+  target_completion_score: 270.8333
+  completion_bonus: 0
+  completed_targets_count: 1
+  total_targets_count: 2
+  total_contribution: 7.0000
+  total_demand: 12
+  total_initial_supply: 12
+
+训练统计:
+  reward_mean: -239.3006
+  reward_std: 379.2144
+  reward_max: 324.4467
+  reward_min: -851.5884
+  reward_final: -649.8221
+  reward_improvement: -93.0154
+  loss_mean: 3437.4312
+  loss_std: 2341.9119
+  loss_final: 4984.5781
+  loss_min: 0.0000
+
+训练历史摘要:
+  总回合数: 13
+  最终奖励: -649.82
+  最终损失: 4984.5781
+  最终探索率: 0.8432
+  最终完成率: 0.7083
+
+配置参数:
+  episodes: 15
+  learning_rate: 0.0001
+  batch_size: 64
+  gamma: 0.99
+  epsilon_start: 0.9
+  epsilon_end: 0.1
+  epsilon_decay: 0.9995

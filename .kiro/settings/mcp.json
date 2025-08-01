@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "C:\\Users\\xianq\\.conda\\envs\\ray312_py312\\python.exe",
+      "args": ["-u", "F:\\Work\\Code\\uavs_plan_v0.3\\mcp_fs.py"],
+      "cwd": "F:\\Work\\Code\\uavs_plan_v0.3",
+      "disabled": false,
+      "autoApprove": [
+        "read_file",
+        "read_multiple_files",
+        "write_file",
+        "create_file",
+        "create_directory",
+        "list_directory",
+        "delete_file",
+        "delete_directory",
+        "move_file",
+        "copy_file",
+        "get_file_info",
+        "search_files",
+        "edit_file",
+        "*"
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "episodes": 0,
+  "high_precision": false,
+  "network_type": "DeepFCNResidual",
+  "epsilon": 0.8517,
+  "timestamp": "20250729-232142"
+}

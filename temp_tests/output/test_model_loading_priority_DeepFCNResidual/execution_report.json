@@ -1,0 +1,52 @@
+{
+  "scenario_name": "test_model_loading_priority",
+  "network_type": "DeepFCNResidual",
+  "training_time": 2.424919843673706,
+  "task_assignments_count": 4,
+  "evaluation_metrics": {
+    "completion_rate": 0.125,
+    "satisfied_targets_rate": 0.5,
+    "target_satisfaction_rate": 0.0,
+    "resource_satisfaction_rate": 0.25,
+    "resource_utilization_rate": 0.25,
+    "total_reward_score": 304.16666666666663,
+    "marginal_utility_score": 75.0,
+    "resource_efficiency_score": 166.66666666666666,
+    "distance_cost_score": -0.0,
+    "target_completion_score": 62.5,
+    "completion_bonus": 0,
+    "completed_targets_count": 0,
+    "total_targets_count": 2,
+    "total_contribution": 3.0,
+    "total_demand": 12,
+    "total_initial_supply": 12
+  },
+  "training_statistics": {
+    "reward_mean": -417.5254042506464,
+    "reward_std": 373.2846649541148,
+    "reward_max": 396.5749963856993,
+    "reward_min": -738.6915771402105,
+    "reward_final": -669.2295015290957,
+    "reward_improvement": -23.370330170790226,
+    "loss_mean": 1814.626778793335,
+    "loss_std": 1826.3444994170636,
+    "loss_final": 4009.0457458496094,
+    "loss_min": 0.0
+  },
+  "training_history_summary": {
+    "total_episodes": 8,
+    "final_reward": -669.2295015290957,
+    "final_loss": 4009.0457458496094,
+    "final_epsilon": 0.8646237392178933,
+    "final_completion_rate": 0.625
+  },
+  "config_summary": {
+    "episodes": 20,
+    "learning_rate": 0.0001,
+    "batch_size": 64,
+    "gamma": 0.99,
+    "epsilon_start": 0.9,
+    "epsilon_end": 0.1,
+    "epsilon_decay": 0.9995
+  }
+}
