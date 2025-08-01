@@ -338,6 +338,21 @@ class GraphRLSolver:
         # 环境
         self.env = UAVTaskEnv(uavs, targets, graph, obstacles, config)
         
+        # 重新计算实际的输入和输出维度，确保与环境一致
+        actual_state = self.env.reset()
+        actual_input_dim = len(actual_state)
+        actual_output_dim = self.env.n_actions
+        
+        print(f"[GraphRLSolver] 维度校正:")
+        print(f"  - 传入的输入维度: {i_dim}, 实际输入维度: {actual_input_dim}")
+        print(f"  - 传入的输出维度: {o_dim}, 实际输出维度: {actual_output_dim}")
+        
+        # 使用实际维度而不是传入的维度
+        if actual_input_dim != i_dim or actual_output_dim != o_dim:
+            print(f"  - 检测到维度不匹配，使用实际维度创建网络")
+            i_dim = actual_input_dim
+            o_dim = actual_output_dim
+        
         # 动作映射
         self.target_id_map = {t.id: i for i, t in enumerate(self.env.targets)}
         self.uav_id_map = {u.id: i for i, u in enumerate(self.env.uavs)}
@@ -688,12 +703,18 @@ class GraphRLSolver:
                 # 如果平均奖励超过历史最佳，保存最佳模型
                 if recent_avg_reward > best_avg_reward:
                     best_avg_reward = recent_avg_reward
-                    # 保存最佳模型到专门路径
+                    
+                    # 清理旧的最佳模型文件
+                    self._cleanup_old_best_models(model_save_path)
+                    
+                    # 保存新的最佳模型
                     best_model_path = model_save_path.replace('.pth', '_best_avg.pth')
-                    self.save_model(best_model_path)
+                    saved_path = self.save_model(best_model_path)
+                    
                     if self.writer:
                         self.writer.add_scalar('Training/Best_Avg_Reward', best_avg_reward, i_episode)
                     print(f"Episode {i_episode}: 新的最佳平均奖励 {best_avg_reward:.2f} (最近{log_interval}轮)")
+                    print(f"  已保存最佳模型: {os.path.basename(saved_path)}")
             
             # 2. 传统单轮奖励早停（保留但提高阈值）
             if episode_reward > best_reward:
@@ -1065,26 +1086,85 @@ class GraphRLSolver:
         
         return new_path
     
+    def _cleanup_old_best_models(self, base_path):
+        """清理旧的最佳模型文件，只保留最新的"""
+        try:
+            dir_path = os.path.dirname(base_path)
+            base_name = os.path.splitext(os.path.basename(base_path))[0]
+            
+            # 查找所有相关的最佳模型文件
+            pattern = f"{base_name}_best_avg_*.pth"
+            old_models = []
+            
+            for filename in os.listdir(dir_path):
+                if filename.startswith(f"{base_name}_best_avg_") and filename.endswith('.pth'):
+                    full_path = os.path.join(dir_path, filename)
+                    old_models.append(full_path)
+            
+            # 删除旧的最佳模型文件（保留最新的3个）
+            if len(old_models) > 3:
+                old_models.sort(key=os.path.getctime)
+                for old_model in old_models[:-3]:  # 保留最新的3个
+                    try:
+                        os.remove(old_model)
+                        # 同时删除对应的info文件
+                        info_file = old_model.replace('.pth', '_info.json')
+                        if os.path.exists(info_file):
+                            os.remove(info_file)
+                        print(f"  已清理旧模型: {os.path.basename(old_model)}")
+                    except Exception as e:
+                        print(f"  清理模型失败 {os.path.basename(old_model)}: {e}")
+                        
+        except Exception as e:
+            print(f"清理旧模型时出错: {e}")
+    
     def load_model(self, path):
-        """加载模型 - 增强版本，支持信息文件"""
-        # 尝试加载模型
-        self.policy_net.load_state_dict(torch.load(path, map_location=self.device))
-        
-        # 尝试加载训练信息
-        info_path = path.replace('.pth', '_info.json')
-        if os.path.exists(info_path):
-            try:
-                with open(info_path, 'r', encoding='utf-8') as f:
-                    training_info = json.load(f)
-                print(f"已加载模型: {os.path.basename(path)}")
-                print(f"  训练轮次: {training_info.get('episodes', 'unknown')}")
-                print(f"  高精度距离: {'是' if training_info.get('high_precision', False) else '否'}")
-                print(f"  最终探索率: {training_info.get('epsilon', 'unknown')}")
-                return training_info
-            except Exception as e:
-                print(f"加载训练信息失败: {e}")
-        
-        return None
+        """加载模型 - 增强版本，支持信息文件和维度检查"""
+        try:
+            # 先加载模型检查维度兼容性
+            checkpoint = torch.load(path, map_location=self.device)
+            
+            # 检查模型维度兼容性
+            current_state_dict = self.policy_net.state_dict()
+            
+            # 检查关键层的维度
+            dimension_mismatch = False
+            mismatch_details = []
+            for key in checkpoint.keys():
+                if key in current_state_dict:
+                    if checkpoint[key].shape != current_state_dict[key].shape:
+                        mismatch_details.append(f"{key}: 保存的模型 {checkpoint[key].shape} vs 当前模型 {current_state_dict[key].shape}")
+                        dimension_mismatch = True
+            
+            if dimension_mismatch:
+                print(f"模型 {os.path.basename(path)} 与当前网络结构不兼容，跳过加载")
+                for detail in mismatch_details:
+                    print(f"  维度不匹配 - {detail}")
+                return None
+            
+            # 维度兼容，加载模型
+            self.policy_net.load_state_dict(checkpoint)
+            
+            # 尝试加载训练信息
+            info_path = path.replace('.pth', '_info.json')
+            if os.path.exists(info_path):
+                try:
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        training_info = json.load(f)
+                    print(f"已加载兼容模型: {os.path.basename(path)}")
+                    print(f"  训练轮次: {training_info.get('episodes', 'unknown')}")
+                    print(f"  高精度距离: {'是' if training_info.get('high_precision', False) else '否'}")
+                    print(f"  最终探索率: {training_info.get('epsilon', 'unknown')}")
+                    return training_info
+                except Exception as e:
+                    print(f"加载训练信息失败: {e}")
+            
+            print(f"已加载兼容模型: {os.path.basename(path)} (无训练信息)")
+            return {}
+            
+        except Exception as e:
+            print(f"加载模型失败: {e}")
+            return None
     
     def get_task_assignments(self, temperature=0.1):
         """
@@ -1753,6 +1833,12 @@ def run_scenario(config, base_uavs, base_targets, obstacles, scenario_name,
     input_dim = len(test_state)
     output_dim = test_env.n_actions
     
+    print(f"状态维度分析:")
+    print(f"  - UAV数量: {len(base_uavs)}, 目标数量: {len(base_targets)}")
+    print(f"  - 状态向量长度: {input_dim}")
+    print(f"  - 动作空间大小: {output_dim}")
+    print(f"  - 状态向量内容: {test_state[:10]}...")  # 显示前10个元素
+    
     # TensorBoard目录 - 直接使用主输出目录
     tensorboard_dir = output_dir
     
@@ -1781,21 +1867,27 @@ def run_scenario(config, base_uavs, base_targets, obstacles, scenario_name,
     model_save_path = None
     
     if existing_models and not force_retrain:
-        # 优先使用基于平均奖励的最佳模型
-        if best_avg_models:
-            latest_model = max(best_avg_models, key=os.path.getctime)
-            print(f"发现基于平均奖励的最佳模型: {os.path.basename(latest_model)}")
-        else:
-            latest_model = max(other_models, key=os.path.getctime)
-            print(f"发现其他已训练模型: {os.path.basename(latest_model)}")
+        # 尝试加载兼容的模型
+        model_loaded = False
         
-        # 加载模型
-        training_info = solver.load_model(latest_model)
-        if training_info:
-            print("模型加载成功，跳过训练阶段")
-            model_save_path = latest_model
-        else:
-            print("模型加载失败，将重新训练")
+        # 优先尝试基于平均奖励的最佳模型
+        models_to_try = []
+        if best_avg_models:
+            models_to_try.extend(sorted(best_avg_models, key=os.path.getctime, reverse=True))
+        if other_models:
+            models_to_try.extend(sorted(other_models, key=os.path.getctime, reverse=True))
+        
+        for model_path in models_to_try:
+            print(f"尝试加载模型: {os.path.basename(model_path)}")
+            training_info = solver.load_model(model_path)
+            if training_info is not None:  # 加载成功（包括空字典）
+                print("模型加载成功，跳过训练阶段")
+                model_save_path = model_path
+                model_loaded = True
+                break
+        
+        if not model_loaded:
+            print("所有现有模型都不兼容，将重新训练")
             force_retrain = True
     
     if not existing_models or force_retrain:
@@ -2001,8 +2093,8 @@ def main():
     # 运行测试场景
     print("加载场景数据...") 
     # uavs, targets, obstacles = get_strategic_trap_scenario(50.0)
-    uavs, targets, obstacles = get_new_experimental_scenario(50.0) 
-    # uavs, targets, obstacles = get_complex_scenario_v4(30)
+    #uavs, targets, obstacles = get_new_experimental_scenario(50.0) 
+    uavs, targets, obstacles = get_complex_scenario_v4(30)
     # uavs, targets, obstacles = get_balanced_scenario(50)
     
     
@@ -2019,7 +2111,7 @@ def main():
     config.MEMORY_CAPACITY = 20000  # 增大经验回放缓冲区
     config.TARGET_UPDATE_FREQ = 10  # 更频繁地更新目标网络
     config.training_config.episodes = 2000  # 增加训练轮数
-    config.NETWORK_TYPE = "DeepFCNResidual" # 使用深度残差网络结构 # 网络结构类型: SimpleNetwork、DeepFCN、GAT、DeepFCNResidual
+    config.NETWORK_TYPE = "GAT" # 使用深度残差网络结构 # 网络结构类型: SimpleNetwork、DeepFCN、GAT、DeepFCNResidual
     
     # 运行场景
     final_plan, training_time, training_history, evaluation_metrics = run_scenario(
