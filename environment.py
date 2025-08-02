@@ -319,18 +319,23 @@ class UAVTaskEnv:
         - 移除绝对坐标，使用归一化相对位置
         - 实体特征仅包含归一化的自身属性
         - 添加鲁棒性掩码机制，支持通信/感知失效场景
+        - 使用固定维度确保批处理兼容性
         
         Returns:
             Dict[str, Any]: 图结构状态字典
         """
+        # 使用固定的最大数量，确保维度一致性
+        max_uavs = getattr(self.config, 'MAX_UAVS', 10)
+        max_targets = getattr(self.config, 'MAX_TARGETS', 15)
+        
         n_uavs = len(self.uavs)
         n_targets = len(self.targets)
         
         # 计算地图尺度用于归一化（假设地图为正方形）
         map_size = getattr(self.config, 'MAP_SIZE', 1000.0)
         
-        # === 1. UAV特征矩阵 [N_uav, uav_feature_dim] ===
-        uav_features = np.zeros((n_uavs, 9), dtype=np.float32)
+        # === 1. UAV特征矩阵 [max_uavs, uav_feature_dim] ===
+        uav_features = np.zeros((max_uavs, 9), dtype=np.float32)
         
         for i, uav in enumerate(self.uavs):
             # 归一化位置 [0, 1]
@@ -362,8 +367,8 @@ class UAVTaskEnv:
                 is_alive                           # 存活状态 (1)
             ]
         
-        # === 2. 目标特征矩阵 [N_target, target_feature_dim] ===
-        target_features = np.zeros((n_targets, 8), dtype=np.float32)
+        # === 2. 目标特征矩阵 [max_targets, target_feature_dim] ===
+        target_features = np.zeros((max_targets, 8), dtype=np.float32)
         
         for i, target in enumerate(self.targets):
             # 归一化位置 [0, 1]
@@ -391,8 +396,8 @@ class UAVTaskEnv:
                 is_visible                                   # 可见性状态 (1)
             ]
         
-        # === 3. 相对位置矩阵 [N_uav, N_target, 2] ===
-        relative_positions = np.zeros((n_uavs, n_targets, 2), dtype=np.float32)
+        # === 3. 相对位置矩阵 [max_uavs, max_targets, 2] ===
+        relative_positions = np.zeros((max_uavs, max_targets, 2), dtype=np.float32)
         
         for i, uav in enumerate(self.uavs):
             for j, target in enumerate(self.targets):
@@ -401,8 +406,8 @@ class UAVTaskEnv:
                 # 归一化到 [-1, 1] 范围
                 relative_positions[i, j] = rel_pos / map_size
         
-        # === 4. 距离矩阵 [N_uav, N_target] ===
-        distances = np.zeros((n_uavs, n_targets), dtype=np.float32)
+        # === 4. 距离矩阵 [max_uavs, max_targets] ===
+        distances = np.zeros((max_uavs, max_targets), dtype=np.float32)
         
         for i, uav in enumerate(self.uavs):
             for j, target in enumerate(self.targets):
@@ -495,15 +500,31 @@ class UAVTaskEnv:
         return self._get_state(), reward, done, truncated, info
 
     def _action_to_assignment(self, action):
-        """将动作索引转换为任务分配"""
+        """将动作索引转换为任务分配 - 修复版本，添加边界检查"""
         n_uavs = len(self.uavs)
         n_targets = len(self.targets)
         n_phi = self.graph.n_phi
+        
+        # 确保动作在有效范围内
+        max_valid_action = n_targets * n_uavs * n_phi - 1
+        if action > max_valid_action:
+            print(f"警告: 动作 {action} 超出有效范围 [0, {max_valid_action}]，调整为模运算结果")
+            action = action % (max_valid_action + 1)
         
         target_idx = action // (n_uavs * n_phi)
         remaining = action % (n_uavs * n_phi)
         uav_idx = remaining // n_phi
         phi_idx = remaining % n_phi
+        
+        # 再次验证索引边界
+        target_idx = min(target_idx, n_targets - 1)
+        uav_idx = min(uav_idx, n_uavs - 1)
+        phi_idx = min(phi_idx, n_phi - 1)
+        
+        # 确保索引非负
+        target_idx = max(0, target_idx)
+        uav_idx = max(0, uav_idx)
+        phi_idx = max(0, phi_idx)
         
         return target_idx, uav_idx, phi_idx
     
@@ -801,6 +822,187 @@ class UAVTaskEnv:
         
         return approach_reward
     
+    def _calculate_uav_alive_status(self, uav, uav_index):
+        """
+        计算无人机的存活状态（鲁棒性掩码）
+        
+        Args:
+            uav: UAV对象
+            uav_index: UAV索引
+            
+        Returns:
+            float: 存活状态 (0.0 或 1.0)
+        """
+        # 基础存活检查：资源是否耗尽
+        if np.all(uav.resources <= 0):
+            return 0.0
+        
+        # 可以在这里添加更复杂的存活逻辑，如：
+        # - 通信失效概率
+        # - 传感器故障概率
+        # - 距离过远导致的信号丢失
+        
+        return 1.0
+    
+    def _calculate_target_visibility_status(self, target, target_index):
+        """
+        计算目标的可见性状态（鲁棒性掩码）
+        
+        Args:
+            target: 目标对象
+            target_index: 目标索引
+            
+        Returns:
+            float: 可见性状态 (0.0 或 1.0)
+        """
+        # 基础可见性检查：目标是否已完成
+        if np.all(target.remaining_resources <= 0):
+            return 0.0
+        
+        # 可以在这里添加更复杂的可见性逻辑，如：
+        # - 天气条件影响
+        # - 障碍物遮挡
+        # - 传感器范围限制
+        
+        return 1.0
+    
+    def _calculate_robust_masks(self):
+        """
+        计算增强的掩码字典，支持鲁棒性场景
+        
+        Returns:
+            dict: 包含各种掩码的字典
+        """
+        n_uavs = len(self.uavs)
+        n_targets = len(self.targets)
+        
+        # UAV有效性掩码
+        uav_mask = np.ones(n_uavs, dtype=np.int32)
+        for i, uav in enumerate(self.uavs):
+            uav_mask[i] = int(self._calculate_uav_alive_status(uav, i))
+        
+        # 目标有效性掩码
+        target_mask = np.ones(n_targets, dtype=np.int32)
+        for i, target in enumerate(self.targets):
+            target_mask[i] = int(self._calculate_target_visibility_status(target, i))
+        
+        return {
+            "uav_mask": uav_mask,
+            "target_mask": target_mask
+        }
+    
+    def _calculate_active_uav_count(self):
+        """
+        计算当前有效无人机数量（用于Per-Agent归一化）
+        
+        Returns:
+            int: 有效无人机数量
+        """
+        active_count = 0
+        for uav in self.uavs:
+            if np.any(uav.resources > 0):  # 至少有一种资源大于0
+                active_count += 1
+        return max(active_count, 1)  # 确保至少为1，避免除零错误
+    
+    def _calculate_congestion_penalty(self, target, uav, n_active_uavs):
+        """
+        计算拥堵惩罚（与UAV数量相关，需要归一化）
+        
+        Args:
+            target: 目标对象
+            uav: UAV对象
+            n_active_uavs: 当前有效无人机数量
+            
+        Returns:
+            float: 拥堵惩罚值
+        """
+        # 计算分配到同一目标的无人机数量
+        uavs_on_target = len(target.allocated_uavs)
+        
+        # 如果多个无人机分配到同一目标，产生拥堵惩罚
+        if uavs_on_target > 1:
+            # 惩罚与分配的无人机数量成正比
+            congestion_factor = (uavs_on_target - 1) / n_active_uavs
+            base_penalty = 2.0  # 基础惩罚
+            return base_penalty * congestion_factor
+        
+        return 0.0
+    
+    def _calculate_global_progress_reward(self):
+        """
+        计算全局完成进度奖励
+        
+        Returns:
+            float: 全局进度奖励
+        """
+        if not self.targets:
+            return 0.0
+        
+        # 计算总体完成进度
+        total_initial_resources = sum(np.sum(target.resources) for target in self.targets)
+        total_remaining_resources = sum(np.sum(target.remaining_resources) for target in self.targets)
+        
+        if total_initial_resources <= 0:
+            return 0.0
+        
+        progress_ratio = (total_initial_resources - total_remaining_resources) / total_initial_resources
+        
+        # 给予渐进式奖励
+        if progress_ratio > 0.8:
+            return 2.0 * (progress_ratio - 0.8) / 0.2  # 80%-100%时给予最高2分
+        elif progress_ratio > 0.5:
+            return 1.0 * (progress_ratio - 0.5) / 0.3  # 50%-80%时给予最高1分
+        else:
+            return 0.5 * progress_ratio / 0.5  # 0%-50%时给予最高0.5分
+    
+    def _calculate_normalization_impact(self, reward_components):
+        """
+        计算归一化对奖励的影响
+        
+        Args:
+            reward_components: 奖励组成字典
+            
+        Returns:
+            dict: 归一化影响分析
+        """
+        impact = {}
+        
+        # 计算归一化前后的差异
+        for component in reward_components.get('normalization_applied', []):
+            raw_key = f"{component}_raw"
+            normalized_key = f"{component}_normalized"
+            
+            if raw_key in reward_components and normalized_key in reward_components:
+                raw_value = reward_components[raw_key]
+                normalized_value = reward_components[normalized_key]
+                impact[component] = {
+                    'raw': raw_value,
+                    'normalized': normalized_value,
+                    'difference': raw_value - normalized_value,
+                    'reduction_ratio': (raw_value - normalized_value) / raw_value if raw_value != 0 else 0
+                }
+        
+        return impact
+    
+    def _log_reward_components(self, reward_components):
+        """
+        记录详细的奖励组成信息（用于调试）
+        
+        Args:
+            reward_components: 奖励组成字典
+        """
+        print(f"[奖励详情] Step {self.step_count}")
+        print(f"  有效UAV数量: {reward_components['n_active_uavs']}")
+        print(f"  最终奖励: {reward_components['final_reward']:.3f}")
+        print(f"  正向奖励总计: {reward_components['total_positive']:.3f}")
+        print(f"  成本总计: {reward_components['total_costs']:.3f}")
+        
+        # 输出归一化信息
+        if reward_components['normalization_applied']:
+            print(f"  归一化组件: {reward_components['normalization_applied']}")
+            for component, impact in reward_components['per_agent_normalization']['normalization_impact'].items():
+                print(f"    {component}: {impact['raw']:.3f} -> {impact['normalized']:.3f} (减少 {impact['reduction_ratio']:.1%})")
+
     def _calculate_collaboration_reward(self, target, uav):
         """
         计算协作塑形奖励
@@ -1310,38 +1512,39 @@ class UAVTaskEnv:
         1. 基础有效性掩码：基于资源状态
         2. 通信/感知掩码：基于is_alive和is_visible位
         3. 组合掩码：为TransformerGNN提供失效节点屏蔽能力
+        4. 使用固定维度确保批处理兼容性
         
         Returns:
             Dict[str, np.ndarray]: 包含多层掩码的字典
         """
+        # 使用固定的最大数量，确保维度一致性
+        max_uavs = getattr(self.config, 'MAX_UAVS', 10)
+        max_targets = getattr(self.config, 'MAX_TARGETS', 15)
+        
         n_uavs = len(self.uavs)
         n_targets = len(self.targets)
         
         # === 基础有效性掩码 ===
-        # UAV基础掩码：基于资源状态
-        uav_resource_mask = np.array([
-            1 if np.any(uav.resources > 0) else 0 
-            for uav in self.uavs
-        ], dtype=np.int32)
+        # UAV基础掩码：基于资源状态，使用固定维度
+        uav_resource_mask = np.zeros(max_uavs, dtype=np.int32)
+        for i, uav in enumerate(self.uavs):
+            uav_resource_mask[i] = 1 if np.any(uav.resources > 0) else 0
         
-        # 目标基础掩码：基于剩余资源状态
-        target_resource_mask = np.array([
-            1 if np.any(target.remaining_resources > 0) else 0
-            for target in self.targets
-        ], dtype=np.int32)
+        # 目标基础掩码：基于剩余资源状态，使用固定维度
+        target_resource_mask = np.zeros(max_targets, dtype=np.int32)
+        for i, target in enumerate(self.targets):
+            target_resource_mask[i] = 1 if np.any(target.remaining_resources > 0) else 0
         
         # === 通信/感知掩码 ===
-        # UAV通信掩码：基于is_alive位
-        uav_communication_mask = np.array([
-            1 if self._calculate_uav_alive_status(uav, i) > 0.5 else 0
-            for i, uav in enumerate(self.uavs)
-        ], dtype=np.int32)
+        # UAV通信掩码：基于is_alive位，使用固定维度
+        uav_communication_mask = np.zeros(max_uavs, dtype=np.int32)
+        for i, uav in enumerate(self.uavs):
+            uav_communication_mask[i] = 1 if self._calculate_uav_alive_status(uav, i) > 0.5 else 0
         
-        # 目标可见性掩码：基于is_visible位
-        target_visibility_mask = np.array([
-            1 if self._calculate_target_visibility_status(target, i) > 0.5 else 0
-            for i, target in enumerate(self.targets)
-        ], dtype=np.int32)
+        # 目标可见性掩码：基于is_visible位，使用固定维度
+        target_visibility_mask = np.zeros(max_targets, dtype=np.int32)
+        for i, target in enumerate(self.targets):
+            target_visibility_mask[i] = 1 if self._calculate_target_visibility_status(target, i) > 0.5 else 0
         
         # === 组合掩码（用于TransformerGNN） ===
         # UAV有效掩码：同时满足资源和通信条件
@@ -1351,8 +1554,8 @@ class UAVTaskEnv:
         target_effective_mask = target_resource_mask & target_visibility_mask
         
         # === 交互掩码 ===
-        # UAV-目标交互掩码 [N_uav, N_target]：标识哪些UAV-目标对可以进行有效交互
-        interaction_mask = np.zeros((n_uavs, n_targets), dtype=np.int32)
+        # UAV-目标交互掩码 [max_uavs, max_targets]：标识哪些UAV-目标对可以进行有效交互
+        interaction_mask = np.zeros((max_uavs, max_targets), dtype=np.int32)
         
         for i in range(n_uavs):
             for j in range(n_targets):

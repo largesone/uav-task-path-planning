@@ -13,7 +13,7 @@ class TrainingConfig:
     
     # ===== 基础训练参数 =====
     episodes: int = 2000                   # 训练轮次
-    learning_rate: float = 0.0001          # 提高学习率，加快收敛
+    learning_rate: float = 0.00005         # 降低学习率，提高数值稳定性
     gamma: float = 0.99                    # 提高折扣因子，更重视长期奖励
     batch_size: int = 64                   # 减小批次大小，提高更新频率
     memory_size: int = 15000               # 适当减小记忆库，避免过旧经验
@@ -50,22 +50,43 @@ class Config:
     
     def __init__(self):
         # ----- 训练系统控制参数 -----
-        self.TRAINING_MODE = 'training'                 # 训练模式: 'training'(训练), 'inference'(推理)
-        self.USE_PHRRT_DURING_TRAINING = True          # 训练时是否使用高精度PH-RRT计算距离
-        self.USE_PHRRT_DURING_PLANNING = True           # 规划时是否使用高精度PH-RRT计算距离
-        self.SAVED_MODEL_PATH = 'output/models/saved_model_final.pth' # 模型保存/加载路径
+        # 训练模式选择：
+        # - 'training': 训练模式，从头开始训练或继续训练
+        # - 'inference': 推理模式，仅加载已训练模型进行推理
+        # - 'zero_shot_train': 零样本训练模式，专用于ZeroShotGNN
+        self.TRAINING_MODE = 'training'
+        
+        # 强制重新训练标志：
+        # - True: 忽略已有模型，强制重新训练
+        # - False: 优先加载已有模型，不存在时才训练
+        self.FORCE_RETRAIN = False
+        
+        # 路径规划精度控制：
+        # - True: 使用高精度PH-RRT算法，计算准确但耗时
+        # - False: 使用快速近似算法，计算快速但精度较低
+        self.USE_PHRRT_DURING_TRAINING = True          # 训练时是否使用高精度PH-RRT
+        self.USE_PHRRT_DURING_PLANNING = True          # 规划时是否使用高精度PH-RRT
+        
+        # 模型保存/加载路径配置
+        self.SAVED_MODEL_PATH = 'output/models/saved_model_final.pth'
         
         # ----- 网络结构选择参数 -----
-        # 网络结构类型: SimpleNetwork、DeepFCN、GAT、DeepFCNResidual
-        self.NETWORK_TYPE = 'DeepFCNResidual'  # 修正网络类型名称
+        # 网络结构类型选择，支持以下候选项：
+        # - 'SimpleNetwork': 基础全连接网络，适合简单场景，训练快速
+        # - 'DeepFCN': 深度全连接网络，具有更强的表达能力
+        # - 'DeepFCNResidual': 带残差连接的深度网络，缓解梯度消失问题
+        # - 'ZeroShotGNN': 零样本图神经网络，具有泛化能力，适合不同规模场景
+        # - 'GAT': 图注意力网络，专注于图结构数据处理
+        self.NETWORK_TYPE = 'ZeroShotGNN'
         
-        # ----- 路径规划参数 =====
-        self.RRT_ITERATIONS = 1000          # RRT迭代次数
-        self.RRT_STEP_SIZE = 50.0           # RRT步长
-        self.RRT_GOAL_BIAS = 0.1            # 目标偏向概率
-        self.RRT_ADAPTIVE_STEP = True       # 是否使用自适应步长
-        self.RRT_OBSTACLE_AWARE = True      # 是否使用障碍物感知采样
-        self.RRT_MAX_ATTEMPTS = 3           # 最大尝试次数
+        # ----- 路径规划参数 -----
+        # RRT算法核心参数：
+        self.RRT_ITERATIONS = 1000          # RRT最大迭代次数，影响路径质量和计算时间
+        self.RRT_STEP_SIZE = 50.0           # RRT单步扩展距离，影响路径平滑度
+        self.RRT_GOAL_BIAS = 0.1            # 目标偏向概率(0-1)，越大越快收敛但可能陷入局部最优
+        self.RRT_ADAPTIVE_STEP = True       # 自适应步长：True=根据环境调整，False=固定步长
+        self.RRT_OBSTACLE_AWARE = True      # 障碍物感知采样：True=避开障碍物，False=随机采样
+        self.RRT_MAX_ATTEMPTS = 3           # 路径规划失败时的最大重试次数
         
         # ===== PH曲线平滑参数 =====
         self.MAX_REFINEMENT_ATTEMPTS = 5    # 最大细化尝试次数
@@ -73,11 +94,22 @@ class Config:
         self.OBSTACLE_TOLERANCE = 50.0      # 障碍物的安全容忍距离
 
         # ----- 图构建参数 -----
-        self.GRAPH_N_PHI = 6                # 构建图时，每个目标节点的离散化接近角度数量
+        # 图结构离散化参数：
+        self.GRAPH_N_PHI = 6                # 每个目标节点的离散化接近角度数量，影响动作空间大小
+
+        # ----- 环境维度参数 -----
+        # 环境规模限制（用于张量维度统一）：
+        self.MAX_UAVS = 10                  # 支持的最大UAV数量，超出会截断
+        self.MAX_TARGETS = 15               # 支持的最大目标数量，超出会截断
+        self.MAP_SIZE = 1000.0              # 地图边长(米)，用于坐标归一化
+        self.MAX_INTERACTION_RANGE = 2000.0 # UAV最大交互距离(米)，超出视为无效
 
         # ----- 模拟与评估参数 -----
-        self.SHOW_VISUALIZATION = False     # 是否显示最终结果的可视化图表
-        self.LOAD_BALANCE_PENALTY = 0.1    # 负载均衡惩罚系数
+        # 可视化控制：
+        self.SHOW_VISUALIZATION = False     # 是否显示matplotlib可视化图表
+        
+        # 负载均衡参数：
+        self.LOAD_BALANCE_PENALTY = 0.1     # 负载不均衡惩罚系数(0-1)，越大越重视均衡
 
         # ----- 奖励函数参数 -----
         self.TARGET_COMPLETION_REWARD = 1500    # 目标完成奖励
@@ -300,7 +332,7 @@ class Config:
     # ===== 训练模式便捷方法 =====
     def set_training_mode(self, mode: str):
         """设置训练模式"""
-        valid_modes = ['training', 'inference']
+        valid_modes = ['training', 'inference', 'zero_shot_train']
         if mode not in valid_modes:
             raise ValueError(f"无效的训练模式: {mode}。有效模式: {valid_modes}")
         self.TRAINING_MODE = mode
