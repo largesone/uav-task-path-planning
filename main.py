@@ -2393,7 +2393,7 @@ def main():
     config.training_config.reward_scaling_factor = 0.1  # 降低奖励缩放
     config.USE_PHRRT_DURING_TRAINING = False  # 关闭PH-RRT以加快训练
     
-    # config.EPISODES = 1500
+    config.EPISODES = 1500
     
     # 选择场景 - 可以修改这里来测试不同场景
     scenario_functions = {

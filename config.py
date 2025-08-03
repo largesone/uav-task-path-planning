@@ -54,12 +54,12 @@ class Config:
         # - 'training': 训练模式，从头开始训练或继续训练
         # - 'inference': 推理模式，仅加载已训练模型进行推理
         # - 'zero_shot_train': 零样本训练模式，专用于ZeroShotGNN
-        self.TRAINING_MODE = 'training'
+        self.TRAINING_MODE = 'zero_shot_train'
         
         # 强制重新训练标志：
         # - True: 忽略已有模型，强制重新训练
         # - False: 优先加载已有模型，不存在时才训练
-        self.FORCE_RETRAIN = False
+        self.FORCE_RETRAIN = True
         
         # 路径规划精度控制：
         # - True: 使用高精度PH-RRT算法，计算准确但耗时
