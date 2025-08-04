@@ -232,7 +232,7 @@ class SEBlock(nn.Module):
         # 重新加权
         return x * y.expand_as(x)
 
-def create_network(network_type: str, input_dim: int, hidden_dims: List[int], output_dim: int) -> nn.Module:
+def create_network(network_type: str, input_dim: int, hidden_dims: List[int], output_dim: int, config=None) -> nn.Module:
     """
     创建指定类型的网络
     
@@ -253,7 +253,7 @@ def create_network(network_type: str, input_dim: int, hidden_dims: List[int], ou
     elif network_type == "DeepFCNResidual":
         return DeepFCNResidual(input_dim, hidden_dims, output_dim)
     elif network_type == "ZeroShotGNN":
-        return ZeroShotGNN(input_dim, hidden_dims, output_dim)
+        return ZeroShotGNN(input_dim, hidden_dims, output_dim, config=config)
     else:
         raise ValueError(f"不支持的网络类型: {network_type}")
 
@@ -269,7 +269,7 @@ class ZeroShotGNN(nn.Module):
     5. 零样本迁移能力，适应不同规模的场景
     """
     
-    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int, dropout: float = 0.1):
+    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int, dropout: float = 0.1, config=None):
         super(ZeroShotGNN, self).__init__()
         
         self.input_dim = input_dim
@@ -343,7 +343,11 @@ class ZeroShotGNN(nn.Module):
         self.position_encoder = PositionalEncoding(self.embedding_dim, dropout)
         
         # === 5. Q值解码器 ===
-        # 为每个UAV输出对所有目标的Q值
+        # 为每个UAV-目标对输出所有可能接近角度的Q值
+        # 输出维度为config.GRAPH_N_PHI（角度数量P）
+        n_phi = getattr(config, 'GRAPH_N_PHI', 6) if hasattr(config, 'GRAPH_N_PHI') else 6
+        self.n_phi = n_phi
+        
         self.q_decoder = nn.Sequential(
             nn.Linear(self.embedding_dim, 128),
             nn.ReLU(),
@@ -351,7 +355,7 @@ class ZeroShotGNN(nn.Module):
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, 1)  # 每个UAV-目标对输出一个Q值
+            nn.Linear(64, n_phi)  # 每个UAV-目标对输出n_phi个Q值
         )
         
         # === 6. 空间编码器 ===
@@ -455,14 +459,34 @@ class ZeroShotGNN(nn.Module):
                 src_key_padding_mask=target_mask_bool
             )  # [batch_size, N_target, embedding_dim]
             
-            # === 3. 交叉注意力 ===
-            # 对每个UAV，计算其对所有目标的注意力
-            uav_target_aware = self.cross_attention(
-                tgt=uav_contextualized,  # query: UAV表示
-                memory=target_contextualized,  # key & value: 目标表示
-                tgt_key_padding_mask=uav_mask_bool,
-                memory_key_padding_mask=target_mask_bool
-            )  # [batch_size, N_uav, embedding_dim]
+            # === 3. 优化的逐无人机交叉注意力 ===
+            # 使用逐无人机的方式计算交叉注意力，避免创建巨大张量
+            uav_target_aware = torch.zeros_like(uav_contextualized)
+            
+            # 逐个处理每架无人机，避免显存瓶颈
+            for uav_idx in range(n_uavs):
+                # 检查当前UAV是否有效
+                if uav_idx < uav_mask_bool.shape[1] and uav_mask_bool[0, uav_idx]:
+                    continue  # 跳过无效的UAV
+                
+                # 提取单个UAV的表示 [batch_size, 1, embedding_dim]
+                single_uav = uav_contextualized[:, uav_idx:uav_idx+1, :]
+                
+                # 为单个UAV计算对所有目标的交叉注意力
+                try:
+                    single_uav_aware = self.cross_attention(
+                        tgt=single_uav,  # query: 单个UAV表示
+                        memory=target_contextualized,  # key & value: 所有目标表示
+                        tgt_key_padding_mask=None,  # 单个UAV不需要掩码
+                        memory_key_padding_mask=target_mask_bool
+                    )  # [batch_size, 1, embedding_dim]
+                    
+                    # 将结果存储回原位置
+                    uav_target_aware[:, uav_idx, :] = single_uav_aware.squeeze(1)
+                    
+                except Exception as e:
+                    # 如果单个UAV的交叉注意力失败，使用原始表示
+                    uav_target_aware[:, uav_idx, :] = uav_contextualized[:, uav_idx, :]
             
         except Exception as e:
             # 如果注意力机制失败，使用简化的处理方式
@@ -470,58 +494,57 @@ class ZeroShotGNN(nn.Module):
             uav_target_aware = uav_embeddings_enhanced
             target_contextualized = target_embeddings
         
-        # === 4. 简化的Q值解码 ===
-        # 使用简化方法避免复杂的向量化操作
-        try:
-            batch_size, n_uavs, embed_dim = uav_target_aware.shape
-            _, n_targets, _ = target_contextualized.shape
-            
-            # 使用简单的线性变换计算Q值
-            q_values_matrix = torch.zeros(batch_size, n_uavs * n_targets, device=uav_target_aware.device)
-            
-            for i in range(min(n_uavs, 10)):  # 限制最大UAV数量
-                for j in range(min(n_targets, 15)):  # 限制最大目标数量
-                    # 简单的点积作为Q值
-                    q_val = torch.sum(uav_target_aware[:, i, :] * target_contextualized[:, j, :], dim=1)
-                    q_values_matrix[:, i * n_targets + j] = q_val
-                    
-        except Exception as e:
-            # 如果计算失败，使用最简化的方法
-            print(f"Q值计算失败，使用最简化方法: {str(e)[:100]}...")
-            batch_size = uav_target_aware.shape[0]
-            q_values_matrix = torch.zeros(batch_size, 150, device=uav_target_aware.device)  # 10*15=150
+        # === 4. 完整的Q值解码 - 输出四维张量 ===
+        batch_size, n_uavs, embed_dim = uav_target_aware.shape
+        _, n_targets, _ = target_contextualized.shape
         
-        # === 5. 处理phi维度 ===
-        # 动态计算phi维度数量，确保不超出输出维度
-        n_phi = self._get_n_phi()
-        expected_actions = n_uavs * n_targets * n_phi
+        # 初始化四维Q值张量 [batch_size, n_uavs, n_targets, n_phi]
+        # 使用实际的UAV和目标数量，而不是固定的最大值
+        q_values_4d = torch.full((batch_size, n_uavs, n_targets, self.n_phi), 
+                                float('-inf'), device=uav_target_aware.device)
         
-        if expected_actions > self.output_dim:
-            # 如果期望的动作数超出输出维度，调整phi数量
-            n_phi = max(1, self.output_dim // (n_uavs * n_targets))
-            expected_actions = n_uavs * n_targets * n_phi
+        # 为每个有效的UAV-目标对计算Q值
+        for i in range(n_uavs):
+            for j in range(n_targets):
+                # 计算UAV-目标交互特征
+                uav_emb = uav_target_aware[:, i, :]  # [batch_size, embed_dim]
+                target_emb = target_contextualized[:, j, :]  # [batch_size, embed_dim]
+                
+                # 简单的加法融合（可以改为更复杂的融合方式）
+                interaction_emb = uav_emb + target_emb  # [batch_size, embed_dim]
+                
+                # 通过Q值解码器得到所有角度的Q值
+                q_values_phi = self.q_decoder(interaction_emb)  # [batch_size, n_phi]
+                
+                # 存储到四维张量中
+                q_values_4d[:, i, j, :] = q_values_phi
         
-        # 将Q值扩展到包含phi维度
-        if n_phi > 1:
-            q_values_expanded = q_values_matrix.unsqueeze(-1).repeat(1, 1, n_phi)  # [batch_size, N_uav * N_target, n_phi]
-            q_values_final = q_values_expanded.view(batch_size, -1)  # [batch_size, N_uav * N_target * n_phi]
-        else:
-            q_values_final = q_values_matrix  # 如果n_phi=1，直接使用
+        # === 5. 应用掩码操作 ===
+        # 对无效的UAV和目标设置极小负数
+        for i in range(n_uavs):
+            for j in range(n_targets):
+                # 检查UAV是否有效
+                if i < uav_mask.shape[1] and uav_mask[0, i] == 0:
+                    q_values_4d[:, i, j, :] = -1e9
+                
+                # 检查目标是否有效
+                if j < target_mask.shape[1] and target_mask[0, j] == 0:
+                    q_values_4d[:, i, j, :] = -1e9
         
-        # 确保输出维度正确
-        if q_values_final.shape[1] > self.output_dim:
-            q_values_final = q_values_final[:, :self.output_dim]
-        elif q_values_final.shape[1] < self.output_dim:
-            # 填充到正确维度
-            padding = torch.full((batch_size, self.output_dim - q_values_final.shape[1]), 
-                               float('-inf'), device=q_values_final.device)
-            q_values_final = torch.cat([q_values_final, padding], dim=1)
+        # === 6. 展平为一维向量 ===
+        # 将四维张量展平为 [batch_size, n_uavs * n_targets * n_phi]
+        q_values_final = q_values_4d.view(batch_size, -1)
         
-        # === 6. 应用掩码 ===
-        # 对无效的UAV-目标对应用掩码
-        action_mask = self._create_action_mask(uav_mask, target_mask, n_phi)
-        if action_mask.shape[1] == q_values_final.shape[1]:
-            q_values_final = q_values_final.masked_fill(action_mask, float('-inf'))
+        # 如果输出维度与期望的output_dim不匹配，进行调整
+        if q_values_final.shape[1] != self.output_dim:
+            if q_values_final.shape[1] > self.output_dim:
+                # 如果实际输出大于期望，截断
+                q_values_final = q_values_final[:, :self.output_dim]
+            else:
+                # 如果实际输出小于期望，填充
+                padding = torch.full((batch_size, self.output_dim - q_values_final.shape[1]), 
+                                   -1e9, device=q_values_final.device)
+                q_values_final = torch.cat([q_values_final, padding], dim=1)
         
         return q_values_final
     
@@ -621,9 +644,7 @@ class ZeroShotGNN(nn.Module):
         
         return q_values_matrix
     
-    def _get_n_phi(self):
-        """获取phi维度数量"""
-        return getattr(self, 'n_phi', 6)  # 默认6个方向
+
     
     def _create_action_mask(self, uav_mask, target_mask, n_phi):
         """

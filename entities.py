@@ -11,7 +11,7 @@ class UAV:
         self.position = np.array(position)
         self.heading = heading
         self.resources = np.array(resources)
-        self.initial_resources = np.array(resources)
+        self.initial_resources = np.array(resources)  # 确保正确保存初始资源
         self.max_distance = max_distance
         self.velocity_range = velocity_range
         self.economic_speed = economic_speed
@@ -19,6 +19,9 @@ class UAV:
         self.current_distance = 0
         self.current_position = np.array(position)
         self.previous_position = None  # 用于塑形奖励计算
+        
+        # [协同增效新增] 计算单次最大运载能力，用于判断协同必要性
+        self.max_payload = np.sum(self.initial_resources)  # 单机最大运载能力
 
     def reset(self):
         """重置无人机的状态到初始值"""

@@ -330,12 +330,26 @@ class GraphRLSolver:
             print("TensorBoard未安装，跳过日志记录")
         
         # 创建网络
-        self.policy_net = create_network(network_type, i_dim, h_dim, o_dim).to(self.device)
-        self.target_net = create_network(network_type, i_dim, h_dim, o_dim).to(self.device)
+        self.policy_net = create_network(network_type, i_dim, h_dim, o_dim, config).to(self.device)
+        self.target_net = create_network(network_type, i_dim, h_dim, o_dim, config).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
         
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=config.LEARNING_RATE)
+        # === Transformer专属优化策略 ===
+        if network_type == "ZeroShotGNN":
+            # 使用AdamW优化器，实现权重衰减的正确解耦
+            self.optimizer = optim.AdamW(
+                self.policy_net.parameters(), 
+                lr=config.LEARNING_RATE,
+                weight_decay=1e-4,  # 权重衰减防止过拟合
+                betas=(0.9, 0.999),  # Transformer推荐的beta值
+                eps=1e-8
+            )
+            print(f"  - 优化器: AdamW (weight_decay=1e-4)")
+        else:
+            # 其他网络使用标准Adam优化器
+            self.optimizer = optim.Adam(self.policy_net.parameters(), lr=config.LEARNING_RATE)
+            print(f"  - 优化器: Adam")
         
         # 使用优先经验回放缓冲区替代普通deque
         self.use_per = config.training_config.use_prioritized_replay
@@ -393,8 +407,30 @@ class GraphRLSolver:
         self.use_grad_clip = True   # 启用梯度裁剪
         self.use_prioritized_replay = True  # 启用优先经验回放
         
-        # 学习率调整
-        self.lr_scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.95)
+        # === 学习率调度策略 ===
+        if network_type == "ZeroShotGNN":
+            # 为ZeroShotGNN实现预热+余弦衰减学习率调度
+            total_steps = config.EPISODES * 100  # 估算总训练步数
+            warmup_steps = int(0.1 * total_steps)  # 预热步数为总步数的10%
+            
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # 预热阶段：线性增长，避免从0开始
+                    return max(0.1, step / warmup_steps)  # 最小学习率为原始的10%
+                else:
+                    # 衰减阶段：余弦衰减
+                    progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+                    return 0.5 * (1 + np.cos(np.pi * progress))
+            
+            self.lr_scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+            self.warmup_steps = warmup_steps
+            self.total_steps = total_steps
+            print(f"  - 学习率调度: 预热+余弦衰减 (预热步数: {warmup_steps}, 总步数: {total_steps})")
+        else:
+            # 其他网络使用标准步长衰减
+            self.lr_scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.95)
+            print(f"  - 学习率调度: 步长衰减")
+        
         self.grad_clip_norm = 0.5   # 更严格的梯度裁剪阈值
         
         # 训练统计
@@ -642,6 +678,16 @@ class GraphRLSolver:
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip_norm)
         
         self.optimizer.step()
+        
+        # === 学习率调度器步进 ===
+        if hasattr(self, 'lr_scheduler'):
+            self.lr_scheduler.step()
+            
+            # 记录学习率到TensorBoard
+            if self.writer:
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.writer.add_scalar('Training/Learning_Rate', current_lr, self.update_count)
+        
         self.update_count += 1
         
         # 更新PER优先级
@@ -2203,6 +2249,23 @@ def run_scenario(config, base_uavs, base_targets, obstacles, scenario_name,
     test_env = UAVTaskEnv(base_uavs, base_targets, graph, obstacles, config, obs_mode=obs_mode)
     test_state = test_env.reset()
     
+    # === 动作空间验证 ===
+    if obs_mode == "graph":
+        # 对于ZeroShotGNN，使用实际的UAV和目标数量计算动作空间
+        actual_uavs = len(base_uavs)
+        actual_targets = len(base_targets)
+        expected_actions = actual_uavs * actual_targets * config.GRAPH_N_PHI
+        actual_actions = test_env.n_actions
+        
+        print(f"动作空间验证:")
+        print(f"  - 期望动作数: {expected_actions} (实际UAV={actual_uavs} × 实际目标={actual_targets} × GRAPH_N_PHI={config.GRAPH_N_PHI})")
+        print(f"  - 实际动作数: {actual_actions}")
+        
+        if expected_actions != actual_actions:
+            print(f"警告: 动作空间不匹配！这通常不应该发生")
+        else:
+            print(f"  ✓ 动作空间验证通过")
+    
     if obs_mode == "flat":
         i_dim = len(test_state)
     else:  # graph mode
@@ -2393,7 +2456,7 @@ def main():
     config.training_config.reward_scaling_factor = 0.1  # 降低奖励缩放
     config.USE_PHRRT_DURING_TRAINING = False  # 关闭PH-RRT以加快训练
     
-    config.EPISODES = 1500
+    config.EPISODES = 1000
     
     # 选择场景 - 可以修改这里来测试不同场景
     scenario_functions = {

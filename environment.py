@@ -90,7 +90,7 @@ class UAVTaskEnv:
         self.obs_mode = obs_mode
         self.step_count = 0
         self.max_steps = len(targets) * len(uavs) * 2
-        self.invalid_action_penalty = -75.0
+        self.invalid_action_penalty = -5.0  # 从-75.0大幅减少到-5.0
         
         # 计算动作空间大小
         self.n_actions = len(targets) * len(uavs) * self.graph.n_phi
@@ -432,8 +432,18 @@ class UAVTaskEnv:
         return graph_state
 
     def step(self, action):
-        """执行一步动作"""
+        """执行一步动作 - 支持可选PBRS的稳定版本"""
         self.step_count += 1
+        
+        # === 可选PBRS：记录动作前势能 ===
+        enable_pbrs = getattr(self.config, 'ENABLE_PBRS', False)
+        potential_before = 0.0
+        if enable_pbrs:
+            pbrs_type = getattr(self.config, 'PBRS_TYPE', 'simple')  # 'simple' 或 'progress'
+            if pbrs_type == 'simple':
+                potential_before = self._calculate_simple_potential()
+            elif pbrs_type == 'progress':
+                potential_before = self._calculate_progress_potential()
         
         # 转换动作
         target_idx, uav_idx, phi_idx = self._action_to_assignment(action)
@@ -461,8 +471,8 @@ class UAVTaskEnv:
         was_satisfied = np.all(target.remaining_resources <= 0)
         
         # 计算路径长度
-        path_len = np.linalg.norm(uav.current_position - target.position)
-        travel_time = path_len / uav.velocity_range[1]
+        path_len = np.linalg.norm(np.array(uav.current_position) - np.array(target.position))
+        travel_time = path_len / uav.velocity_range[1] if uav.velocity_range[1] > 0 else 0.0
         
         # 更新状态
         uav.resources = uav.resources.astype(np.float64) - actual_contribution.astype(np.float64)
@@ -471,7 +481,7 @@ class UAVTaskEnv:
         if uav_idx not in {a[0] for a in target.allocated_uavs}:
             target.allocated_uavs.append((uav_idx, phi_idx))
         uav.task_sequence.append((target_idx, phi_idx))
-        uav.current_position = target.position
+        uav.current_position = np.array(target.position).copy()
         uav.heading = phi_idx * (2 * np.pi / self.graph.n_phi)
         
         # 检查是否完成所有目标
@@ -479,14 +489,59 @@ class UAVTaskEnv:
         total_targets = len(self.targets)
         done = bool(total_satisfied == total_targets)
         
-        # 计算奖励
-        reward = self._calculate_reward(target, uav, actual_contribution, path_len, 
-                                      was_satisfied, travel_time, done)
+        # === 可选PBRS：记录动作后势能并计算塑形奖励 ===
+        potential_after = 0.0
+        shaping_reward = 0.0
+        
+        if enable_pbrs:
+            if pbrs_type == 'simple':
+                potential_after = self._calculate_simple_potential()
+            elif pbrs_type == 'progress':
+                potential_after = self._calculate_progress_potential()
+            
+            # 计算PBRS塑形奖励：γ * Φ(s') - Φ(s)
+            gamma = getattr(self.config, 'GAMMA', 0.99)
+            raw_shaping_reward = gamma * potential_after - potential_before
+            
+            # 添加数值稳定性检查和裁剪
+            if np.isnan(raw_shaping_reward) or np.isinf(raw_shaping_reward):
+                shaping_reward = 0.0
+                print(f"警告: 塑形奖励为NaN/Inf，已重置为0")
+            else:
+                # 裁剪塑形奖励到合理范围
+                clip_min = getattr(self.config, 'PBRS_REWARD_CLIP_MIN', -50.0)
+                clip_max = getattr(self.config, 'PBRS_REWARD_CLIP_MAX', 50.0)
+                shaping_reward = np.clip(raw_shaping_reward, clip_min, clip_max)
+        
+        # 计算基础奖励 - 根据网络类型选择奖励函数
+        network_type = getattr(self.config, 'NETWORK_TYPE', 'FCN')
+        if network_type == 'ZeroShotGNN':
+            # 使用协同增效版奖励函数（不需要info参数）
+            base_reward = self._calculate_synergistic_reward(target, uav, actual_contribution, path_len, 
+                                                           was_satisfied, travel_time, done)
+        else:
+            # 其他网络使用原有奖励函数
+            base_reward = self._calculate_simple_reward(target, uav, actual_contribution, path_len, 
+                                                       was_satisfied, travel_time, done)
+        
+        # 总奖励 = 基础奖励 + 塑形奖励
+        total_reward = base_reward + shaping_reward
+        
+        # 应用奖励归一化（紧急稳定性修复）
+        if getattr(self.config, 'REWARD_NORMALIZATION', False):
+            reward_scale = getattr(self.config, 'REWARD_SCALE', 1.0)
+            total_reward *= reward_scale
+        
+        # 数值稳定性检查
+        if getattr(self.config, 'ENABLE_NUMERICAL_STABILITY_CHECKS', False):
+            if np.isnan(total_reward) or np.isinf(total_reward):
+                print(f"警告: 总奖励为NaN/Inf ({total_reward})，重置为0")
+                total_reward = 0.0
         
         # 检查是否超时
         truncated = self.step_count >= self.max_steps
         
-        # 构建信息字典
+        # 构建详细信息字典
         info = {
             'target_id': int(target_idx),
             'uav_id': int(uav_idx),
@@ -494,10 +549,155 @@ class UAVTaskEnv:
             'actual_contribution': float(np.sum(actual_contribution)),
             'path_length': float(path_len),
             'travel_time': float(travel_time),
-            'done': bool(done)
+            'done': bool(done),
+            
+            # PBRS相关信息
+            'pbrs_enabled': enable_pbrs,
+            'base_reward': float(base_reward),
+            'shaping_reward': float(shaping_reward),
+            'potential_before': float(potential_before),
+            'potential_after': float(potential_after),
+            'total_reward': float(total_reward)
         }
         
-        return self._get_state(), reward, done, truncated, info
+        return self._get_state(), total_reward, done, truncated, info
+
+    def _calculate_simple_reward(self, target, uav, actual_contribution, path_len, 
+                                was_satisfied, travel_time, done):
+        """
+        优化奖励函数 - 首要满足资源需求，其次路径最短
+        
+        设计原则：
+        1. 首要目标：满足任务资源需求 (高权重正奖励)
+        2. 次要目标：路径最短 (低权重负奖励)
+        3. 任何资源贡献都给予正奖励
+        4. 大幅减少无效动作惩罚
+        """
+        reward = 0.0
+        
+        # === 首要目标：满足资源需求 (高优先级正奖励) ===
+        
+        # 1. 最终成功的巨大奖励
+        if done:
+            reward += 100.0
+        
+        # 2. 单个目标完成奖励
+        now_satisfied = np.all(target.remaining_resources <= 0)
+        if now_satisfied and not was_satisfied:
+            reward += 30.0  # 从20.0增加到30.0
+        
+        # 3. 资源贡献奖励 - 核心改进：任何贡献都给奖励
+        contribution_amount = np.sum(actual_contribution)
+        if contribution_amount > 0:
+            # 基础贡献奖励
+            base_contribution_reward = 5.0  # 从1.0大幅增加到5.0
+            
+            # 贡献量比例奖励 - 贡献越多奖励越高
+            target_total_need = np.sum(target.resources)
+            if target_total_need > 0:
+                contribution_ratio = contribution_amount / target_total_need
+                ratio_reward = 10.0 * contribution_ratio  # 最高10分的比例奖励
+            else:
+                ratio_reward = 0.0
+            
+            # 资源匹配奖励 - 鼓励高效的资源利用
+            uav_total_resources = np.sum(uav.resources) + contribution_amount  # 原始资源量
+            if uav_total_resources > 0:
+                efficiency_ratio = contribution_amount / uav_total_resources
+                efficiency_reward = 5.0 * efficiency_ratio  # 最高5分的效率奖励
+            else:
+                efficiency_reward = 0.0
+            
+            total_contribution_reward = base_contribution_reward + ratio_reward + efficiency_reward
+            reward += total_contribution_reward
+        
+        # === 次要目标：路径最短 (低优先级负奖励) ===
+        
+        # 4. 大幅减少的飞行成本 - 只有在有贡献时才考虑路径优化
+        if contribution_amount > 0:
+            # 只对有效贡献的行动考虑路径成本，且权重大幅降低
+            flight_cost = -0.002 * path_len  # 从-0.01减少到-0.002 (减少80%)
+            reward += flight_cost
+        
+        return reward
+
+    def _calculate_synergistic_reward(self, target, uav, actual_contribution, path_len, 
+                                    was_satisfied, travel_time, done):
+        """
+        [协同增效版] 融合了任务完成与智能协作的奖励函数
+        
+        专门针对ZeroShotGNN网络设计，引入"协同增效"奖励层，
+        精确引导智能体学习何时以及如何进行高效的团队协作。
+        
+        核心设计理念：
+        1. 保持"任务完成"为最高优先级
+        2. 对必须通过多无人机协作才能完成的"高需求"目标给予巨大奖励
+        3. 避免"为协同而协同"的资源浪费
+        4. 确保与其他网络类型的奖励过程隔离
+        """
+        
+        # 1. 巨大的最终成功奖励 (当所有目标都完成时) - 保持不变
+        all_targets_satisfied = all(np.all(t.remaining_resources <= 0) for t in self.targets)
+        if done and all_targets_satisfied:
+            return 1000.0  # 最高优先级
+        
+        # 2. 显著的中间成功奖励：新完成一个目标
+        now_satisfied = np.all(target.remaining_resources <= 0)
+        new_satisfied = now_satisfied and not was_satisfied
+        base_completion_reward = 0.0
+        
+        if new_satisfied:
+            base_completion_reward = 200.0
+            
+            # --- [核心新增] "协同增效"奖励计算 ---
+            # 只有在新完成了一个目标时，才检查这次完成是否是"协同增效"的
+            
+            # a. 获取所有参与攻击该目标的无人机
+            participating_uav_ids = {uav_info[0] for uav_info in target.allocated_uavs}
+            
+            # b. 检查协同的"必要性"
+            is_synergistic = False
+            if len(participating_uav_ids) > 1:
+                # 检查目标的总需求是否超过了任何一个参与者的单机最大运载能力
+                target_total_demand = np.sum(target.resources)
+                max_single_payload = 0
+                
+                for uav_id in participating_uav_ids:
+                    # 从UAV列表中找到对应的无人机对象
+                    uav_obj = None
+                    for u in self.uavs:
+                        if u.id == uav_id:
+                            uav_obj = u
+                            break
+                    
+                    if uav_obj is not None:
+                        max_single_payload = max(max_single_payload, uav_obj.max_payload)
+                
+                # 判断是否需要协同：目标需求超过单机最大能力
+                if target_total_demand > max_single_payload:
+                    is_synergistic = True
+            
+            # c. 如果是"协同增效"，则给予巨大奖励
+            if is_synergistic:
+                # 这个奖励应该非常大，以激励智能体去学习这种复杂的行为
+                synergy_bonus = 300.0
+                base_completion_reward += synergy_bonus
+                print(f"🎯 协同增效攻击成功！目标 {target.id} 被摧毁，参与UAV: {participating_uav_ids}，获得额外奖励 {synergy_bonus}")
+        
+        # 3. 基础行动奖励：对目标造成有效伤害（有资源贡献）
+        action_reward = 0.0
+        if np.sum(actual_contribution) > 0:
+            # 给予一个微小的正奖励，以鼓励"行动"
+            # 附带一个微小的、百分比形式的飞行成本惩罚
+            # 惩罚不应超过基础奖励，仅作为tie-breaker
+            path_cost_penalty = (path_len / 5000.0) * 0.5
+            action_reward = 1.0 - path_cost_penalty
+        
+        # 4. 强惩罚：仅惩罚绝对的错误动作（零贡献） - 保持不变
+        if np.sum(actual_contribution) <= 0:
+            return -5.0
+        
+        return base_completion_reward + action_reward
 
     def _action_to_assignment(self, action):
         """将动作索引转换为任务分配 - 修复版本，添加边界检查"""
@@ -585,7 +785,7 @@ class UAVTaskEnv:
         
         return float(total_reward)
     
-    def _calculate_reward(self, target, uav, actual_contribution, path_len, 
+    def _calculate_reward_legacy(self, target, uav, actual_contribution, path_len, 
                          was_satisfied, travel_time, done):
         """
         Per-Agent归一化奖励函数 - 解决尺度漂移问题
@@ -784,6 +984,69 @@ class UAVTaskEnv:
         
         return float(final_reward)
     
+    # ===== PBRS相关方法 - 渐进式安全实现 =====
+    
+    def _calculate_simple_potential(self):
+        """
+        最简单的势函数：Φ = 100 * (已完成目标数 / 总目标数)
+        
+        特点：
+        - 单调递增：完成更多目标势能更高
+        - 目标明确：直接对应最终目标
+        - 最不可能出错：逻辑简单清晰
+        - 理论安全：不改变最优策略
+        
+        Returns:
+            float: 势能值 [0, 100]
+        """
+        completed_targets = sum(1 for t in self.targets if np.all(t.remaining_resources <= 0))
+        total_targets = len(self.targets)
+        
+        if total_targets == 0:
+            return 0.0
+        
+        completion_ratio = completed_targets / total_targets
+        potential = 100.0 * completion_ratio
+        
+        # 应用缩放因子
+        scale = getattr(self.config, 'PBRS_POTENTIAL_SCALE', 1.0)
+        potential *= scale
+        
+        return potential
+    
+    def _calculate_progress_potential(self):
+        """
+        进度势函数：Φ = 100 * (总资源消耗进度)
+        
+        特点：
+        - 连续变化：每次资源消耗都有反馈
+        - 稠密信号：提供更多学习信息
+        - 平滑过渡：避免奖励悬崖
+        
+        Returns:
+            float: 势能值 [0, 100]
+        """
+        total_initial_demand = sum(np.sum(t.resources) for t in self.targets)
+        total_remaining_demand = sum(np.sum(t.remaining_resources) for t in self.targets)
+        
+        if total_initial_demand <= 0:
+            return 0.0
+        
+        progress_ratio = (total_initial_demand - total_remaining_demand) / total_initial_demand
+        potential = 100.0 * progress_ratio
+        
+        # 应用缩放因子
+        scale = getattr(self.config, 'PBRS_POTENTIAL_SCALE', 1.0)
+        potential *= scale
+        
+        return potential
+
+    # def _calculate_pbrs_base_reward(self, target, uav, actual_contribution, was_satisfied, all_targets_satisfied):
+    #     """
+    #     PBRS系统的基础奖励函数 - 已注释，恢复稳定基线
+    #     """
+    #     pass
+
     def _calculate_approach_reward(self, uav, target):
         """
         计算接近目标的塑形奖励
